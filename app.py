@@ -4,34 +4,49 @@ from PIL import Image
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import io
+import os
+import glob
 
 # --- Existing Analysis Functions (Modified for Web/Streamlit) ---
 
 @st.cache_data
-def load_image(uploaded_file):
-    """Load 12-bit PNG image (stored as 16-bit) from uploaded file and convert to numpy array."""
-    # Use io.BytesIO to read the uploaded file data
-    img = Image.open(io.BytesIO(uploaded_file.getvalue()))
-    img_array = np.array(img, dtype=np.float64)
+def load_image(file_content):
+    """
+    Load 12-bit PNG image (stored as 16-bit) from file content (BytesIO or actual file path) 
+    and convert to numpy array.
+    """
+    try:
+        if isinstance(file_content, io.BytesIO):
+            # This handles Streamlit's UploadedFile object content
+            img = Image.open(file_content)
+        elif isinstance(file_content, str) and os.path.exists(file_content):
+            # This handles local file paths (for pre-uploaded files)
+            img = Image.open(file_content)
+        else:
+            st.error("Invalid file content provided to load_image.")
+            return None
 
-    # Check if values are shifted (16-bit container for 12-bit data)
-    if img_array.max() > 4095:
-        # Note: You can't use print() in a Streamlit app. Use st.write or st.info
-        st.info("Detected bit-shifted image, converting from 16-bit to 12-bit (dividing by 16.0)...")
-        img_array = img_array / 16.0  # Right shift by 4 bits
+        img_array = np.array(img, dtype=np.float64)
 
-    return img_array
+        # Check if values are shifted (16-bit container for 12-bit data)
+        if img_array.max() > 4095:
+            st.info("Detected bit-shifted image, converting from 16-bit to 12-bit (dividing by 16.0)...")
+            img_array = img_array / 16.0  # Right shift by 4 bits
+        
+        return img_array
+
+    except Exception as e:
+        st.error(f"Error loading image: {e}")
+        return None
 
 def calculate_statistics(img_array):
-    """Calculate mean, std, and contrast of the image."""
+    """Calculate min, max, mean, std, and contrast of the image."""
+    min_val = np.min(img_array)
+    max_val = np.max(img_array)
     mean_val = np.mean(img_array)
     std_val = np.std(img_array)
     # Contrast definition: std/mean
     contrast = std_val / mean_val if mean_val != 0 else 0
-    
-    # Pixel range
-    min_val = np.min(img_array)
-    max_val = np.max(img_array)
     
     return min_val, max_val, mean_val, std_val, contrast
 
@@ -64,7 +79,7 @@ def find_speckle_size(autocorr):
     
     return speckle_x, speckle_y, autocorr_x, autocorr_y
 
-def plot_image(img, min_val, max_val, mean_val, std_val, contrast):
+def plot_image(img, min_val, max_val, mean_val, std_val, contrast, file_name):
     """Generates the interactive Plotly figure for the original image."""
     fig1 = go.Figure(data=go.Heatmap(
         z=img,
@@ -75,7 +90,7 @@ def plot_image(img, min_val, max_val, mean_val, std_val, contrast):
     
     fig1.update_layout(
         title={
-            'text': f'**Original Speckle Image**<br><sup>Shape: {img.shape}, Min: {min_val:.1f}, Max: {max_val:.1f}</sup>',
+            'text': f'**Original Speckle Image: {file_name}**<br><sup>Min: {min_val:.1f}, Max: {max_val:.1f}</sup>',
             'y':0.95, 'x':0.5, 'xanchor': 'center', 'yanchor': 'top'
         },
         xaxis_title='X [pixels]',
@@ -136,44 +151,85 @@ st.set_page_config(
 )
 
 st.title("🔬 Interactive Speckle Image Analyzer")
-st.markdown("Upload a **12-bit PNG** image for analysis. The tool will calculate image statistics and speckle size via 2D Autocorrelation.")
+st.markdown("Upload a **12-bit PNG** image or select one from the app folder for analysis. The tool calculates image statistics and speckle size via 2D Autocorrelation.")
 
-# File Uploader component (handles the 'list where they can choose the specific image by name')
-uploaded_file = st.file_uploader(
-    "Choose a PNG image file", 
-    type="png", 
-    help="Upload your 12-bit (stored as 16-bit) PNG speckle image."
+# --- Image Selection Logic ---
+image_files = sorted(glob.glob("*.png"))
+selected_file_content = None
+selected_file_name = None
+
+st.sidebar.header("Image Source Selection")
+source_option = st.sidebar.radio(
+    "How would you like to load the image?",
+    ("Upload a new file", "Select from deployed files"),
+    index=0 if not image_files else 1 # Default to selecting deployed if files exist
 )
 
-if uploaded_file is not None:
+if source_option == "Select from deployed files":
+    if image_files:
+        selected_file_name = st.sidebar.selectbox(
+            "Choose a PNG file from the app directory:",
+            options=image_files,
+            index=0
+        )
+        # For deployed files, we pass the file path. load_image will handle opening it.
+        if selected_file_name:
+            selected_file_content = selected_file_name
+        st.sidebar.caption(f"Note: These {len(image_files)} files were committed to the repository.")
+    else:
+        st.sidebar.warning("No PNG files found in the app directory. Please upload one.")
+        # If no files are found locally, switch to upload mode
+        source_option = "Upload a new file" 
+
+
+if source_option == "Upload a new file":
+    uploaded_file = st.sidebar.file_uploader(
+        "Upload a new PNG image file", 
+        type="png", 
+        help="Upload your 12-bit (stored as 16-bit) PNG speckle image."
+    )
+    if uploaded_file is not None:
+        selected_file_name = uploaded_file.name
+        # For uploaded files, we pass the file content buffer.
+        selected_file_content = io.BytesIO(uploaded_file.getvalue())
+    st.sidebar.caption("Uploaded files are processed securely but are not saved permanently.")
+
+
+# --- Analysis Execution ---
+
+if selected_file_content is not None:
     
-    # Display the selected file name
-    st.sidebar.header("Selected Image")
-    st.sidebar.text(uploaded_file.name)
+    st.header(f"Analyzing: {selected_file_name}")
     
     # Use a try-except block for robust error handling
     try:
         # Load and process the image
-        img = load_image(uploaded_file)
+        img = load_image(selected_file_content)
         
+        if img is None:
+            st.error("Could not load image data.")
+            st.stop()
+            
         # Calculate statistics
         min_val, max_val, mean_val, std_val, contrast = calculate_statistics(img)
         
         # Calculate autocorrelation
-        autocorr = calculate_autocorrelation_fft(img)
+        with st.spinner("Calculating 2D Autocorrelation (this may take a moment)..."):
+            autocorr = calculate_autocorrelation_fft(img)
         
         # Calculate speckle size and cross-sections
         speckle_x, speckle_y, autocorr_x, autocorr_y = find_speckle_size(autocorr)
         
-        st.header("Results and Statistics")
+        st.subheader("Results and Statistics")
         
         # Display results in a clear table/metric format
         col1, col2, col3, col4, col5 = st.columns(5)
         
-        col1.metric("Min/Max Pixel Value", f"{min_val:.1f} / {max_val:.1f}")
-        col2.metric("Mean Intensity (μ)", f"{mean_val:.2f}")
-        col3.metric("Std. Deviation (σ)", f"{std_val:.2f}")
-        col4.metric("Contrast (σ/μ)", f"{contrast:.4f}")
+        col1.metric("Min Pixel Value", f"{min_val:.1f}")
+        col2.metric("Max Pixel Value", f"{max_val:.1f}")
+        col3.metric("Mean Intensity (μ)", f"{mean_val:.2f}")
+        col4.metric("Std. Deviation (σ)", f"{std_val:.2f}")
+        col5.metric("Contrast (σ/μ)", f"{contrast:.4f}")
         
         st.markdown("---")
         
@@ -186,7 +242,7 @@ if uploaded_file is not None:
         # --- Display Interactive Figures ---
         
         st.subheader("1. Original Image and Pixel Map (Plotly Heatmap)")
-        fig1 = plot_image(img, min_val, max_val, mean_val, std_val, contrast)
+        fig1 = plot_image(img, min_val, max_val, mean_val, std_val, contrast, selected_file_name)
         st.plotly_chart(fig1, use_container_width=True)
         
         st.subheader("2. Autocorrelation Cross-sections (Plotly Subplots)")
@@ -194,8 +250,8 @@ if uploaded_file is not None:
         st.plotly_chart(fig2, use_container_width=True)
 
     except Exception as e:
-        st.error(f"An error occurred during processing: {e}")
-        st.warning("Please ensure the uploaded file is a valid 12-bit PNG file (potentially stored in a 16-bit container).")
+        st.error(f"An unexpected error occurred during analysis: {e}")
+        st.warning("Please check the console for detailed error information or try another image.")
 
 else:
-    st.info("Please upload an image to begin the speckle analysis.")
+    st.info("Please select an image source to begin the speckle analysis.")
