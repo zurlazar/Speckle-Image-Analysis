@@ -32,7 +32,7 @@ def load_image(file_content):
         if img_array.max() > 4095:
             st.info("Detected bit-shifted image, converting from 16-bit to 12-bit (dividing by 16.0)...")
             img_array = img_array / 16.0  # Right shift by 4 bits
-        
+            
         return img_array
 
     except Exception as e:
@@ -62,20 +62,39 @@ def calculate_autocorrelation_fft(img_array):
     return autocorr
 
 def find_speckle_size(autocorr):
-    """Estimate speckle size from autocorrelation function."""
+    """
+    Estimate speckle size from autocorrelation function using the FWHM criterion.
+    The FWHM threshold is 0.5 (half of the maximum, which is 1 after normalization).
+    """
     center_y, center_x = np.array(autocorr.shape) // 2
     autocorr_x = autocorr[center_y, :]
     autocorr_y = autocorr[:, center_x]
     
-    threshold = 1/np.e**2
+    # FWHM Threshold is 0.5 (Half Maximum of the normalized peak)
+    threshold = 0.5
     
-    # X direction
-    right_idx = np.where(autocorr_x[center_x:] < threshold)[0]
-    speckle_x = 2 * right_idx[0] if len(right_idx) > 0 else autocorr.shape[1] // 4
+    # --- X direction (Speckle_x) ---
+    # Find indices where the correlation drops below the threshold (starting from the center)
+    right_of_center = autocorr_x[center_x:]
+    # np.where returns a tuple, take the first array of indices
+    right_idx = np.where(right_of_center < threshold)[0]
     
-    # Y direction
-    down_idx = np.where(autocorr_y[center_y:] < threshold)[0]
-    speckle_y = 2 * down_idx[0] if len(down_idx) > 0 else autocorr.shape[0] // 4
+    # Speckle size is 2 * the index of the first point below the threshold.
+    # We use 2 * right_idx[0] because the autocorrelation is symmetric around the center.
+    if len(right_idx) > 0:
+        speckle_x = 2 * right_idx[0]
+    else:
+        # Fallback if the autocorrelation never drops below 0.5 (should not happen for a speckle field)
+        speckle_x = autocorr.shape[1] // 4 
+    
+    # --- Y direction (Speckle_y) ---
+    down_of_center = autocorr_y[center_y:]
+    down_idx = np.where(down_of_center < threshold)[0]
+    
+    if len(down_idx) > 0:
+        speckle_y = 2 * down_idx[0]
+    else:
+        speckle_y = autocorr.shape[0] // 4
     
     return speckle_x, speckle_y, autocorr_x, autocorr_y
 
@@ -108,21 +127,26 @@ def plot_autocorr_cross_sections(autocorr_x, autocorr_y, speckle_x, speckle_y):
         subplot_titles=('Autocorrelation - X Cross-section', 'Autocorrelation - Y Cross-section')
     )
     
-    threshold = 1/np.e**2
+    # FWHM threshold
+    threshold = 0.5 
     
     # 1. X Cross-section (Row 1)
     x_axis = np.arange(len(autocorr_x)) - len(autocorr_x) // 2
     fig2.add_trace(go.Scatter(x=x_axis, y=autocorr_x, mode='lines', name='X Autocorr', line=dict(color='blue')), row=1, col=1)
+    # Highlight the FWHM threshold
     fig2.add_shape(type="line", x0=x_axis.min(), y0=threshold, x1=x_axis.max(), y1=threshold,
                     line=dict(color="red", width=2, dash="dash"), row=1, col=1)
+    # Highlight the calculated FWHM width (Speckle Size)
     fig2.add_vline(x=speckle_x/2, line_width=2, line_dash="dot", line_color="green", row=1, col=1)
     fig2.add_vline(x=-speckle_x/2, line_width=2, line_dash="dot", line_color="green", row=1, col=1)
     
     # 2. Y Cross-section (Row 2)
     y_axis = np.arange(len(autocorr_y)) - len(autocorr_y) // 2
     fig2.add_trace(go.Scatter(x=y_axis, y=autocorr_y, mode='lines', name='Y Autocorr', line=dict(color='blue')), row=2, col=1)
+    # Highlight the FWHM threshold
     fig2.add_shape(type="line", x0=y_axis.min(), y0=threshold, x1=y_axis.max(), y1=threshold,
                     line=dict(color="red", width=2, dash="dash"), row=2, col=1)
+    # Highlight the calculated FWHM width (Speckle Size)
     fig2.add_vline(x=speckle_y/2, line_width=2, line_dash="dot", line_color="green", row=2, col=1)
     fig2.add_vline(x=-speckle_y/2, line_width=2, line_dash="dot", line_color="green", row=2, col=1)
     
@@ -135,7 +159,7 @@ def plot_autocorr_cross_sections(autocorr_x, autocorr_y, speckle_x, speckle_y):
     fig2.update_layout(
         height=800, 
         width=800, 
-        title_text="**Speckle Autocorrelation Cross-sections (Width at 1/e²)**",
+        title_text="**Speckle Autocorrelation Cross-sections (FWHM)**",
         showlegend=False,
         margin=dict(l=20, r=20, t=80, b=20)
     )
@@ -150,8 +174,8 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-st.title("🔬 Interactive Speckle Image Analyzer")
-st.markdown("Upload a **12-bit PNG** image or select one from the app folder for analysis. The tool calculates image statistics and speckle size via 2D Autocorrelation.")
+st.title("🔬 Interactive Speckle Image Analyzer (FWHM Method)")
+st.markdown("Upload a **12-bit PNG** image or select one from the app folder for analysis. The tool calculates image statistics and speckle size via 2D Autocorrelation using the **Full Width at Half Maximum (FWHM)** criterion.")
 
 # --- Image Selection Logic ---
 image_files = sorted(glob.glob("*.png"))
@@ -217,7 +241,7 @@ if selected_file_content is not None:
         with st.spinner("Calculating 2D Autocorrelation (this may take a moment)..."):
             autocorr = calculate_autocorrelation_fft(img)
         
-        # Calculate speckle size and cross-sections
+        # Calculate speckle size and cross-sections (NOW USING FWHM)
         speckle_x, speckle_y, autocorr_x, autocorr_y = find_speckle_size(autocorr)
         
         st.subheader("Results and Statistics")
@@ -234,8 +258,9 @@ if selected_file_content is not None:
         st.markdown("---")
         
         col_x, col_y = st.columns(2)
-        col_x.metric("Speckle Size (X)", f"{speckle_x:.1f} pixels", help="Calculated as the full width at $1/e^2$ of the central peak.")
-        col_y.metric("Speckle Size (Y)", f"{speckle_y:.1f} pixels", help="Calculated as the full width at $1/e^2$ of the central peak.")
+        # Updated help text to reflect FWHM
+        col_x.metric("Speckle Size (X)", f"{speckle_x:.1f} pixels", help="Calculated as the **Full Width at Half Maximum (FWHM)** of the central peak.")
+        col_y.metric("Speckle Size (Y)", f"{speckle_y:.1f} pixels", help="Calculated as the **Full Width at Half Maximum (FWHM)** of the central peak.")
         
         st.markdown("---")
         
