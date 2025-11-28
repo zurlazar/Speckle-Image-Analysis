@@ -7,7 +7,7 @@ import io
 import os
 import glob
 
-# --- Existing Analysis Functions (Modified for Web/Streamlit) ---
+# --- Analysis Functions (Modified for Web/Streamlit and PSD return) ---
 
 @st.cache_data
 def load_image(file_content):
@@ -52,14 +52,29 @@ def calculate_statistics(img_array):
 
 @st.cache_data
 def calculate_autocorrelation_fft(img_array):
-    """Calculate 2D autocorrelation using FFT method."""
+    """
+    Calculate 2D autocorrelation using FFT method and return both
+    the normalized autocorrelation and the shifted, log-scaled power spectrum.
+    """
     img_norm = img_array - np.mean(img_array)
     f_img = np.fft.fft2(img_norm)
-    power_spectrum = np.abs(f_img) ** 2
-    autocorr = np.fft.ifft2(power_spectrum).real
+    
+    # Raw power spectrum
+    power_spectrum_raw = np.abs(f_img) ** 2
+    
+    # Shift zero frequency to center for visualization
+    power_spectrum_shifted = np.fft.fftshift(power_spectrum_raw)
+    
+    # Apply log scale for better visualization of PSD dynamic range
+    # Add a small constant to avoid log(0)
+    power_spectrum_log = np.log10(power_spectrum_shifted + 1e-6) 
+    
+    # Autocorrelation part
+    autocorr = np.fft.ifft2(power_spectrum_raw).real # Use raw PSD for autocorr
     autocorr = np.fft.fftshift(autocorr)
-    autocorr = autocorr / autocorr.max()
-    return autocorr
+    autocorr = autocorr / autocorr.max() # Normalize autocorr to 1
+    
+    return autocorr, power_spectrum_log
 
 def find_speckle_size(autocorr):
     """
@@ -74,17 +89,12 @@ def find_speckle_size(autocorr):
     threshold = 0.5
     
     # --- X direction (Speckle_x) ---
-    # Find indices where the correlation drops below the threshold (starting from the center)
     right_of_center = autocorr_x[center_x:]
-    # np.where returns a tuple, take the first array of indices
     right_idx = np.where(right_of_center < threshold)[0]
     
-    # Speckle size is 2 * the index of the first point below the threshold.
-    # We use 2 * right_idx[0] because the autocorrelation is symmetric around the center.
     if len(right_idx) > 0:
         speckle_x = 2 * right_idx[0]
     else:
-        # Fallback if the autocorrelation never drops below 0.5 (should not happen for a speckle field)
         speckle_x = autocorr.shape[1] // 4 
     
     # --- Y direction (Speckle_y) ---
@@ -120,6 +130,36 @@ def plot_image(img, min_val, max_val, mean_val, std_val, contrast, file_name):
     )
     return fig1
 
+def plot_psd(power_spectrum_log, img_shape):
+    """Generates the interactive Plotly figure for the Power Spectral Density."""
+    fig_psd = go.Figure(data=go.Heatmap(
+        z=power_spectrum_log,
+        colorscale='Viridis', # 'Viridis' or 'Jet' often good for frequency data
+        colorbar=dict(title='Log10(Power)'),
+        hoverongaps=False 
+    ))
+
+    # Calculate frequency axes (e.g., from -0.5 to 0.5 cycles/pixel)
+    ny, nx = img_shape
+    freq_x = np.fft.fftshift(np.fft.fftfreq(nx))
+    freq_y = np.fft.fftshift(np.fft.fftfreq(ny))
+
+    # Update axis labels to show actual frequency range (e.g., -0.5 to 0.5)
+    fig_psd.update_layout(
+        title={
+            'text': '**Power Spectral Density (PSD)**<br><sup>Log-scaled, Zero Frequency at Center</sup>',
+            'y':0.95, 'x':0.5, 'xanchor': 'center', 'yanchor': 'top'
+        },
+        xaxis_title='Spatial Frequency Fx [cycles/pixel]',
+        yaxis_title='Spatial Frequency Fy [cycles/pixel]',
+        xaxis=dict(tickmode='array', tickvals=np.linspace(0, nx-1, 5), ticktext=[f"{f:.2f}" for f in np.linspace(freq_x.min(), freq_x.max(), 5)]),
+        yaxis=dict(tickmode='array', tickvals=np.linspace(0, ny-1, 5), ticktext=[f"{f:.2f}" for f in np.linspace(freq_y.min(), freq_y.max(), 5)],
+                   scaleanchor="x", scaleratio=1), # Maintain aspect ratio
+        autosize=True,
+        margin=dict(l=20, r=20, t=100, b=20)
+    )
+    return fig_psd
+
 def plot_autocorr_cross_sections(autocorr_x, autocorr_y, speckle_x, speckle_y):
     """Generates the interactive Plotly subplots for autocorrelation cross-sections."""
     fig2 = make_subplots(
@@ -133,20 +173,16 @@ def plot_autocorr_cross_sections(autocorr_x, autocorr_y, speckle_x, speckle_y):
     # 1. X Cross-section (Row 1)
     x_axis = np.arange(len(autocorr_x)) - len(autocorr_x) // 2
     fig2.add_trace(go.Scatter(x=x_axis, y=autocorr_x, mode='lines', name='X Autocorr', line=dict(color='blue')), row=1, col=1)
-    # Highlight the FWHM threshold
     fig2.add_shape(type="line", x0=x_axis.min(), y0=threshold, x1=x_axis.max(), y1=threshold,
                     line=dict(color="red", width=2, dash="dash"), row=1, col=1)
-    # Highlight the calculated FWHM width (Speckle Size)
     fig2.add_vline(x=speckle_x/2, line_width=2, line_dash="dot", line_color="green", row=1, col=1)
     fig2.add_vline(x=-speckle_x/2, line_width=2, line_dash="dot", line_color="green", row=1, col=1)
     
     # 2. Y Cross-section (Row 2)
     y_axis = np.arange(len(autocorr_y)) - len(autocorr_y) // 2
     fig2.add_trace(go.Scatter(x=y_axis, y=autocorr_y, mode='lines', name='Y Autocorr', line=dict(color='blue')), row=2, col=1)
-    # Highlight the FWHM threshold
     fig2.add_shape(type="line", x0=y_axis.min(), y0=threshold, x1=y_axis.max(), y1=threshold,
                     line=dict(color="red", width=2, dash="dash"), row=2, col=1)
-    # Highlight the calculated FWHM width (Speckle Size)
     fig2.add_vline(x=speckle_y/2, line_width=2, line_dash="dot", line_color="green", row=2, col=1)
     fig2.add_vline(x=-speckle_y/2, line_width=2, line_dash="dot", line_color="green", row=2, col=1)
     
@@ -175,7 +211,7 @@ st.set_page_config(
 )
 
 st.title("🔬 Interactive Speckle Image Analyzer (FWHM Method)")
-st.markdown("Upload a **12-bit PNG** image or select one from the app folder for analysis. The tool calculates image statistics and speckle size via 2D Autocorrelation using the **Full Width at Half Maximum (FWHM)** criterion.")
+st.markdown("Upload a **12-bit PNG** image or select one from the app folder for analysis. The tool calculates image statistics, displays the Power Spectral Density, and estimates speckle size via 2D Autocorrelation using the **Full Width at Half Maximum (FWHM)** criterion.")
 
 # --- Image Selection Logic ---
 image_files = sorted(glob.glob("*.png"))
@@ -196,13 +232,11 @@ if source_option == "Select from deployed files":
             options=image_files,
             index=0
         )
-        # For deployed files, we pass the file path. load_image will handle opening it.
         if selected_file_name:
             selected_file_content = selected_file_name
         st.sidebar.caption(f"Note: These {len(image_files)} files were committed to the repository.")
     else:
         st.sidebar.warning("No PNG files found in the app directory. Please upload one.")
-        # If no files are found locally, switch to upload mode
         source_option = "Upload a new file" 
 
 
@@ -214,7 +248,6 @@ if source_option == "Upload a new file":
     )
     if uploaded_file is not None:
         selected_file_name = uploaded_file.name
-        # For uploaded files, we pass the file content buffer.
         selected_file_content = io.BytesIO(uploaded_file.getvalue())
     st.sidebar.caption("Uploaded files are processed securely but are not saved permanently.")
 
@@ -225,7 +258,6 @@ if selected_file_content is not None:
     
     st.header(f"Analyzing: {selected_file_name}")
     
-    # Use a try-except block for robust error handling
     try:
         # Load and process the image
         img = load_image(selected_file_content)
@@ -237,9 +269,9 @@ if selected_file_content is not None:
         # Calculate statistics
         min_val, max_val, mean_val, std_val, contrast = calculate_statistics(img)
         
-        # Calculate autocorrelation
-        with st.spinner("Calculating 2D Autocorrelation (this may take a moment)..."):
-            autocorr = calculate_autocorrelation_fft(img)
+        # Calculate autocorrelation and Power Spectral Density
+        with st.spinner("Calculating 2D Autocorrelation and Power Spectral Density..."):
+            autocorr, power_spectrum_log = calculate_autocorrelation_fft(img)
         
         # Calculate speckle size and cross-sections (NOW USING FWHM)
         speckle_x, speckle_y, autocorr_x, autocorr_y = find_speckle_size(autocorr)
@@ -258,7 +290,6 @@ if selected_file_content is not None:
         st.markdown("---")
         
         col_x, col_y = st.columns(2)
-        # Updated help text to reflect FWHM
         col_x.metric("Speckle Size (X)", f"{speckle_x:.1f} pixels", help="Calculated as the **Full Width at Half Maximum (FWHM)** of the central peak.")
         col_y.metric("Speckle Size (Y)", f"{speckle_y:.1f} pixels", help="Calculated as the **Full Width at Half Maximum (FWHM)** of the central peak.")
         
@@ -270,7 +301,12 @@ if selected_file_content is not None:
         fig1 = plot_image(img, min_val, max_val, mean_val, std_val, contrast, selected_file_name)
         st.plotly_chart(fig1, use_container_width=True)
         
-        st.subheader("2. Autocorrelation Cross-sections (Plotly Subplots)")
+        st.subheader("2. Power Spectral Density (PSD)")
+        # Pass img.shape to plot_psd for correct frequency axis scaling
+        fig_psd = plot_psd(power_spectrum_log, img.shape) 
+        st.plotly_chart(fig_psd, use_container_width=True)
+
+        st.subheader("3. Autocorrelation Cross-sections (FWHM)")
         fig2 = plot_autocorr_cross_sections(autocorr_x, autocorr_y, speckle_x, speckle_y)
         st.plotly_chart(fig2, use_container_width=True)
 
