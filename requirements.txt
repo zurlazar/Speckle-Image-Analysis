@@ -2,3 +2,5 @@ streamlit
 numpy
 Pillow
 plotly
+opencv-python
+tifffile 
